@@ -3,14 +3,17 @@ import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, TextInput, TouchableOpacity, Button, Keyboard, FlatList, View, Image } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { db, storage } from './components/config';
+import { db, storage, auth } from './components/config';
+import { GoogleAuthProvider, onAuthStateChanged, signInWithCredential } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useCollection } from 'react-firebase-hooks/firestore';
 import { collection, doc, setDoc, addDoc, getDocs, deleteDoc, updateDoc, getDoc } from 'firebase/firestore'
 import * as ImagePicker from 'expo-image-picker';
-
-
 import axios from 'axios';
+import * as Google from 'expo-auth-session/providers/google';
+
+// ioS 869824628594-61v56aq5b0c9bhbks8qqiu9fifo71qpo.apps.googleusercontent.com
+// android 869824628594-fvq7umk9bdn87tggvb638nfvcuthefv4.apps.googleusercontent.com
 
 const API_KEY = "AIzaSyDMRNaAdpZ4qpu_wKgG2UBBGDb5Qj8wScg";
 const AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=";
@@ -18,16 +21,16 @@ const SIGNUP_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signUp?ke
 
 const Stack = createNativeStackNavigator();
 
-async function updateVinylFire(id, title, email, imagePath, imageChanged) {
+async function updateVinylFire(id, title, uid, imagePath, imageChanged) {
   if(title != "") {
-    await updateDoc(doc(db, "users", email, "collection", id), {
+    await updateDoc(doc(db, userID, "collection", id), {
       title: title
     });
   }
   if (imageChanged) {
     const uploadImage = await fetch(imagePath);
     const blob = await uploadImage.blob();
-    const storageRef = await ref(storage, email + id + ".jpg");
+    const storageRef = await ref(storage, uid + id + ".jpg");
     uploadBytes(storageRef, blob)
     .then( (snapshot) => {
       console.log("Image uploaded!");
@@ -36,6 +39,8 @@ async function updateVinylFire(id, title, email, imagePath, imageChanged) {
     .catch((error) => console.log("Image failed to upload: " + error));
   }
 }
+
+
 
 const App = () => {
 
@@ -74,17 +79,78 @@ const App = () => {
 
 const Login = ({ navigation, route }) => {
 
+  const [accessToken, setAccessToken] = useState(null);
+  const [userInfo, setUserInfo] = useState(null);
+
   async function login(email, password) {
+    console.log(email, password)
     try {
       const response = await axios.post(AUTH_URL + API_KEY, {
         email: email,
         password: password,
         returnSecureToken: true,
       });
-      navigation.navigate("Home", { email: email });
+      const uid = response.data.localId;
+      navigation.navigate("Home", { email: email, uid: uid });
     } catch (error) {
       alert("Wrong password or username");
     }
+  }
+
+  const [request, response, promptAsync] = Google.useAuthRequest({
+    androidClientId: "869824628594-fvq7umk9bdn87tggvb638nfvcuthefv4.apps.googleusercontent.com",
+    iosClientId: "869824628594-61v56aq5b0c9bhbks8qqiu9fifo71qpo.apps.googleusercontent.com"
+  });
+
+  useEffect(() => {
+    if (response && response.type === "success") {
+      setAccesToken(response.authentication.accessToken);
+      console.log("Tilbage!", response.authentication.accessToken);
+      getUserData();
+      signInFirebase();
+    }
+  }, [response]);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setUserInfo(user);
+      } else {
+        console.log("No user");
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  async function getUserData() {
+    let userInfoResponse = await fetch("https://www.googleapis.com/userinfo/v2/me", {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+
+    userInfoResponse.json()
+    .then((data) => {
+      console.log(data);
+    });
+  }
+
+  async function signInFirebase() {
+    const { id_token } = response.params;
+    const credential = GoogleAuthProvider.credential(id_token);
+    signInWithCredential(auth, credential)
+    .then((data) => {
+      console.log("tilbage far fire!", data);
+      const { user } = data;
+      const uid = user.uid;
+    })
+    .catch((error) => {
+      console.log("Fejl fra fire", error);
+    });
+    const [values, loading, error] = await useCollection(collection(db, "users", uid, "collection"));
+    if (value === undefined) {
+      const result = await setDoc(doc(db, "users", uid), {});
+      await collection(db, "users", uid, "collection");
+    }
+      navigation.navigate("Home", { uid: uid });
   }
 
   const [username, setUsername] = useState('');
@@ -114,9 +180,17 @@ const Login = ({ navigation, route }) => {
     style={ styles.button } 
     title='createAccount' 
     onPress={ () => {
-          navigation.navigate("Signup")
+          navigation.navigate("Signup");
       }}>
         <Text style={styles.buttonText}>CREATE NEW ACCOUNT</Text>
+    </TouchableOpacity>
+    <TouchableOpacity 
+    style={ styles.button } 
+    title='GLogin' 
+    onPress={ () => {
+          promptAsync();
+      }}>
+        <Text style={styles.buttonText}>LOGIN WITH GOOGLE</Text>
     </TouchableOpacity>
     </View>
   );
@@ -128,17 +202,19 @@ const Signup = ({ navigation, route }) => {
   const [newPassword, setNewPassword] = useState('');
   let [showErrorBox, setShowErrorBox] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-
+  
   async function signup(email, password) {
+  
     try {
       const response = await axios.post(SIGNUP_URL + API_KEY, {
         email: email,
         password: password,
         returnSecureToken: true
       });
-      await setDoc(doc(db, "users", email), {});
-      await collection(db, "users", email, "collection");
-      navigation.navigate("Home", { email: email });
+      const uid = response.data.localId;
+      const result = await setDoc(doc(db, "users", uid), {});
+      await collection(db, "users", uid, "collection");
+      navigation.navigate("Home", { email: email, uid: uid });
     } catch(error) {
       showErrorBoxFunction(error.response.data.error.message);
     }
@@ -183,7 +259,8 @@ const Signup = ({ navigation, route }) => {
 
 const Home = ({ navigation, route }) => {
   const email = route.params?.email;
-  const [values, loading, error] = useCollection(collection(db, "users", email, "collection"));
+  const uid = route.params?.uid;
+  const [values, loading, error] = useCollection(collection(db, "users", uid, "collection"));
   const [data, setData] = useState([]);
   const [imagePaths, setImagePaths] = useState([]);
 
@@ -198,7 +275,6 @@ const Home = ({ navigation, route }) => {
       }
   
       if (route.params && route.params.imageChanged) {
-        console.log("JUBII");
         const updatedId = route.params.id;
         const updatedImagePath = await downloadImage(updatedId);
         console.log(updatedImagePath);
@@ -215,7 +291,7 @@ const Home = ({ navigation, route }) => {
 
   const downloadImage = async (id) => {
     try {
-      const url = await getDownloadURL(ref(storage, email + id + ".jpg"));
+      const url = await getDownloadURL(ref(storage, uid + id + ".jpg"));
       return url;
     } catch (error) {
       console.error("Error downloading image:", error);
@@ -232,7 +308,7 @@ const Home = ({ navigation, route }) => {
           paths[item.id] = imagePath;
         } catch (error) {
           console.error("Error downloading image:", error);
-          paths[item.id] = null; // Handle the error gracefully
+          paths[item.id] = null; 
         }
       })
     );
@@ -240,7 +316,7 @@ const Home = ({ navigation, route }) => {
   };
 
   const deleteDocument = async (id) => {
-    await deleteDoc(doc(db, "users", email, "collection", id));
+    await deleteDoc(doc(db, "users", uid, "collection", id));
   };
 
   const updateVinyl = (id, newVinyl) => {
@@ -255,7 +331,7 @@ const Home = ({ navigation, route }) => {
     <TouchableOpacity
       style={styles.item}
       onPress={() => {
-        navigation.navigate("VinylPage", { id: item.id, title: item.title, email: email, updateVinyl: updateVinyl });
+        navigation.navigate("VinylPage", { id: item.id, title: item.title, uid: uid, email: email, updateVinyl: updateVinyl });
       }}
     >
       <View>
@@ -284,7 +360,7 @@ const Home = ({ navigation, route }) => {
       <Button
         title='New vinyl'
         onPress={() => {
-          navigation.navigate("CreateVinylPage", { email: email });
+          navigation.navigate("CreateVinylPage", { email: email, uid: uid });
         }}
       />
     </View>
@@ -296,8 +372,9 @@ const Home = ({ navigation, route }) => {
 const VinylPage = ({ navigation, route }) => {
   const title = route.params?.title;
   const id = route.params?.id;
+  const uid = route.params?.uid;
   const email = route.params?.email;
-  const updateNote = route.params?.updateNote;
+  const updateVinyl = route.params?.updateVinyl;
   const [newTitle, setNewTitle] = useState('');
   const [imagePath, setImagePath] = useState(null);
   const [imageChanged, setImageChanged] = useState(false);
@@ -308,7 +385,7 @@ const VinylPage = ({ navigation, route }) => {
   }, [])
 
   async function downloadImage() {
-    await getDownloadURL(ref(storage, email + id + ".jpg"))
+    await getDownloadURL(ref(storage, uid + id + ".jpg"))
     .then( (url) => {
       setImagePath(url);
     });
@@ -326,28 +403,34 @@ const VinylPage = ({ navigation, route }) => {
   
   async function launchCamera() {
     const result = await ImagePicker.requestCameraPermissionsAsync();
-    if(!result) {
+    if (!result) {
       alert("Camera access not provided");
-    } else {
-      ImagePicker.launchCameraAsync({
+      return null;
+    }
+  
+    try {
+      return ImagePicker.launchCameraAsync({
         quality: 1
       })
       .then((response) => {
-        if(!response.canceled) {
+        if (!response.canceled) {
           setImageChanged(true);
           return response.assets[0].uri;
+        } else {
+          return null;
         }
-      })
-      .catch((error) => {
-        alert("Camera failed: " + error);
       });
+    } catch (error) {
+      alert("Camera failed: " + error);
+      return null;
     }
   }
+  
 
   return (
     <View style={styles.container}>
       <Text style={styles.heading}>{title}</Text>
-      <Image style={{ width:200, height:200 }} source={{ uri:imagePath }}/>
+      <Image style={styles.vinylImg} source={{ uri:imagePath }}/>
       <TextInput
         style={ styles.textInput }
         onChangeText={(txt) => setNewTitle(txt)}
@@ -355,18 +438,18 @@ const VinylPage = ({ navigation, route }) => {
         value={newTitle}
       />
       <TouchableOpacity style={ styles.button } title='pickImage'  onPress={async () => {
-          try {
             const img = await launchImagePicker();
             setImagePath(img);
-          } catch (error) {
-            console.error("Error using camera:", error);
-          }
         }}>
         <Text>ADD IMAGE</Text>
       </TouchableOpacity>
       <TouchableOpacity style={ styles.button } title='useCamera' onPress={ async () => {
-         const img = await launchCamera();
-         setImagePath(img); 
+         launchCamera()
+         .then((img) => {
+          if(img !== null) { 
+            setImagePath(img);
+          }})
+         .catch((error) => console.log(error));
       }}>
         <Text>TAKE PICTURE</Text>
       </TouchableOpacity>
@@ -374,16 +457,14 @@ const VinylPage = ({ navigation, route }) => {
         style={ styles.button }
         title='Save changes'
         onPress={ async () => {
-          console.log(imageChanged)
-            await updateVinylFire(id, newTitle, email, imagePath, imageChanged);
+            await updateVinylFire(id, newTitle, uid, imagePath, imageChanged);
             if (imageChanged === false ) {
-              console.log("WHY", imageChanged)
               navigation.goBack();
             } else {
               setTimeout(() => {
-                navigation.navigate("Home", { imageChanged: true, id: id, email: email });
+                navigation.navigate("Home", { imageChanged: true, uid: uid, id: id, email: email });
                 setImageChanged(false);
-              }, 500); 
+              }, 1000); 
             }
         }}
       >
@@ -396,6 +477,7 @@ const VinylPage = ({ navigation, route }) => {
 const CreateVinylPage = ({ navigation, route }) => {
 
   const email = route.params?.email;
+  const uid = route.params?.uid;
   const [newTitle, setNewTitle] = useState('');
   const [newArtist, setNewArtist] = useState('');
   const [newCountry, setNewCountry] = useState('');
@@ -433,7 +515,7 @@ const CreateVinylPage = ({ navigation, route }) => {
         title='Add new vinyl'
         onPress={ async () => {
             try {
-              await addDoc(collection(db, "users", email, "collection"), { title: newTitle, artist: newArtist, country: newCountry, year: newYear });
+              await addDoc(collection(db, "users", uid, "collection"), { title: newTitle, artist: newArtist, country: newCountry, year: newYear });
               navigation.goBack();
             } catch(err) {
               console.log(err);
@@ -509,6 +591,11 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'flex-end',
   },
+  vinylImg: {
+    height: 200,
+    width: 200,
+    paddingBottom: '5%'
+  }
 });
 
 export default App;
